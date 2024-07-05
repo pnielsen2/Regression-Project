@@ -3,3 +3,4 @@ scikit-learn
 matplotlib
 wandb
 thop  # for FLOPs calculation
+python-dotenv
