@@ -1,0 +1,5 @@
+torch
+scikit-learn
+matplotlib
+wandb
+thop  # for FLOPs calculation
