@@ -15,14 +15,16 @@ def get_optimizer(optimizer_name, parameters, lr):
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
+def count_flops(model, input_size):
+    input_tensor = torch.randn(1, input_size).to(next(model.parameters()).device)
+    flops, _ = profile(model, inputs=(input_tensor,))
+    return flops
+
 def train_model(model, criterion, optimizer, train_loader, test_loader, num_epochs, max_flops):
     train_losses = []
     test_losses = []
     total_flops = 0
-    
-    # Calculate FLOPs for a single forward pass
-    input_sample = next(iter(train_loader))[0][:1]
-    flops_per_sample, _ = profile(model, inputs=(input_sample,))
+    flops_per_forward = count_flops(model, train_loader.dataset.tensors[0].shape[1])
     
     for epoch in range(num_epochs):
         model.train()
@@ -37,22 +39,17 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, num_epoc
 
             if torch.isnan(loss):
                 print(f'Epoch {epoch+1}: Detected NaN loss, stopping training.')
-                return train_losses, test_losses
+                return train_losses, test_losses, total_flops
 
             loss.backward()
-
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
             
-            # Update total FLOPs
-            total_flops += flops_per_sample * X_batch.size(0)
+            total_flops += flops_per_forward * X_batch.size(0) * 2  # *2 for forward and backward pass
             
-            # Check if we've exceeded the max FLOPs
             if total_flops > max_flops:
                 print(f'Reached max FLOPs ({max_flops}), stopping training.')
-                return train_losses, test_losses
+                return train_losses, test_losses, total_flops
         
         train_losses.append(loss.item())
 
@@ -69,24 +66,21 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, num_epoc
 
                 if torch.isnan(batch_loss):
                     print(f'Epoch {epoch+1}: Detected NaN test loss, stopping training.')
-                    return train_losses, test_losses
+                    return train_losses, test_losses, total_flops
 
                 test_loss += batch_loss.item()
+                total_flops += flops_per_forward * X_batch.size(0)
                 
-                # Update total FLOPs
-                total_flops += flops_per_sample * X_batch.size(0)
-                
-                # Check if we've exceeded the max FLOPs
                 if total_flops > max_flops:
                     print(f'Reached max FLOPs ({max_flops}), stopping training.')
-                    return train_losses, test_losses
+                    return train_losses, test_losses, total_flops
             
             test_losses.append(test_loss / len(test_loader))
         
         if (epoch + 1) % 10 == 0:
-            print(f'{model.__class__.__name__} - Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item()}, Test Loss: {test_loss / len(test_loader)}')
+            print(f'{model.__class__.__name__} - Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item()}, Test Loss: {test_loss / len(test_loader)}, Total FLOPs: {total_flops}')
 
-    return train_losses, test_losses
+    return train_losses, test_losses, total_flops
 
 def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, device):
     input_size = X_train_tensor.shape[1]
@@ -115,21 +109,30 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
         'NormalModelGlobalSigma': get_optimizer(config.optimizer, models['NormalModelGlobalSigma'].parameters(), config.learning_rate)
     }
 
+    max_flops = config.max_flops if hasattr(config, 'max_flops') else 1e12  # Default to a large number if not specified
+
     best_test_loss = float('inf')
     best_model_name = None
 
-    max_flops = config.max_flops if hasattr(config, 'max_flops') else 1e12  # Default to a large number if not specified
-
     for name in models.keys():
         print(f'Training {name}...')
-        train_losses, test_losses = train_model(
+        train_losses, test_losses, total_flops = train_model(
             models[name], criterions[name], optimizers[name],
             train_loader, test_loader, config.num_epochs, max_flops
         )
         for epoch in range(len(train_losses)):
-            wandb.log({f'{name}_train_loss': train_losses[epoch], f'{name}_test_loss': test_losses[epoch]})
+            wandb.log({
+                f'{name}_train_loss': train_losses[epoch],
+                f'{name}_test_loss': test_losses[epoch],
+                f'{name}_total_flops': total_flops,
+                f'{name}_flops_per_epoch': total_flops / (epoch + 1)
+            })
         if test_losses[-1] < best_test_loss:
             best_test_loss = test_losses[-1]
             best_model_name = name
 
-    wandb.log({'best_model': best_model_name, 'best_test_loss': best_test_loss})
+    wandb.log({
+        'best_model': best_model_name,
+        'best_test_loss': best_test_loss,
+        'total_flops': sum(wandb.run.summary[f'{name}_total_flops'] for name in models.keys())
+    })
