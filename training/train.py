@@ -87,11 +87,11 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                         raise StopIteration(f'{name}: Reached max FLOPs ({max_flops}), stopping training.')
 
             # Evaluation
-            for name, model in models.items():
-                model.eval()
-
             test_losses = {name: 0 for name in models}
             output_params = {name: [] for name in models}
+            
+            for name, model in models.items():
+                model.eval()
             
             with torch.no_grad():
                 for X_batch, y_batch in test_loader:
@@ -100,12 +100,18 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                     for name, model in models.items():
                         output = model(X_batch)
                         
-                        if isinstance(output, tuple):
-                            loss = criterions[name](*output, y_batch)
-                            output_params[name].append([o.cpu() for o in output])
-                        else:
-                            loss = criterions[name](output, y_batch)
-                            output_params[name].append(output.cpu())
+                        if name == 'TModel':
+                            mu, sigma, nu = output
+                            loss = criterions[name](y_batch, mu, sigma, nu)
+                            output_params[name].append((mu.cpu(), sigma.cpu(), nu.cpu()))
+                        elif name == 'NormalModel':
+                            mu, sigma = output
+                            loss = criterions[name](y_batch, mu, sigma)
+                            output_params[name].append((mu.cpu(), sigma.cpu()))
+                        else:  # NormalModelGlobalSigma
+                            mu = output
+                            loss = criterions[name](y_batch, mu, model.sigma)
+                            output_params[name].append(mu.cpu())
 
                         if torch.isnan(loss):
                             raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN test loss, stopping training.')
@@ -122,24 +128,37 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                 avg_test_loss = test_losses[name] / len(test_loader)
                 
                 # Calculate mean and std of output parameters
-                if isinstance(output_params[name][0], list):  # For TModel
+                if name == 'TModel':
+                    mu_cat = torch.cat([batch[0] for batch in output_params[name]])
+                    sigma_cat = torch.cat([batch[1] for batch in output_params[name]])
+                    nu_cat = torch.cat([batch[2] for batch in output_params[name]])
                     output_stats = {
-                        f'{name}_mu_mean': torch.cat([batch[0] for batch in output_params[name]]).mean().item(),
-                        f'{name}_mu_std': torch.cat([batch[0] for batch in output_params[name]]).std().item(),
-                        f'{name}_sigma_mean': torch.cat([batch[1] for batch in output_params[name]]).mean().item(),
-                        f'{name}_sigma_std': torch.cat([batch[1] for batch in output_params[name]]).std().item(),
-                        f'{name}_nu_mean': torch.cat([batch[2] for batch in output_params[name]]).mean().item(),
-                        f'{name}_nu_std': torch.cat([batch[2] for batch in output_params[name]]).std().item()
+                        f'{name}_mu_mean': mu_cat.mean().item(),
+                        f'{name}_mu_std': mu_cat.std().item(),
+                        f'{name}_sigma_mean': sigma_cat.mean().item(),
+                        f'{name}_sigma_std': sigma_cat.std().item(),
+                        f'{name}_nu_mean': nu_cat.mean().item(),
+                        f'{name}_nu_std': nu_cat.std().item()
                     }
-                else:  # For NormalModel and NormalModelGlobalSigma
+                elif name == 'NormalModel':
+                    mu_cat = torch.cat([batch[0] for batch in output_params[name]])
+                    sigma_cat = torch.cat([batch[1] for batch in output_params[name]])
                     output_stats = {
-                        f'{name}_mu_mean': torch.cat(output_params[name])[:, 0].mean().item(),
-                        f'{name}_mu_std': torch.cat(output_params[name])[:, 0].std().item(),
-                        f'{name}_sigma_mean': torch.cat(output_params[name])[:, 1].mean().item(),
-                        f'{name}_sigma_std': torch.cat(output_params[name])[:, 1].std().item()
+                        f'{name}_mu_mean': mu_cat.mean().item(),
+                        f'{name}_mu_std': mu_cat.std().item(),
+                        f'{name}_sigma_mean': sigma_cat.mean().item(),
+                        f'{name}_sigma_std': sigma_cat.std().item()
+                    }
+                else:  # NormalModelGlobalSigma
+                    mu_cat = torch.cat(output_params[name])
+                    output_stats = {
+                        f'{name}_mu_mean': mu_cat.mean().item(),
+                        f'{name}_mu_std': mu_cat.std().item(),
+                        f'{name}_sigma': models[name].sigma.item()  # Log the global sigma
                     }
 
                 wandb.log({
+                    'epoch': epoch,
                     'flops': total_flops[name],
                     f'{name}_train_loss': avg_train_loss,
                     f'{name}_test_loss': avg_test_loss,
