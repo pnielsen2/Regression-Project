@@ -9,7 +9,7 @@ class BaseModel(nn.Module):
             nn.Linear(hidden_size, hidden_size) for _ in range(num_hidden_layers)
         ])
         self.output_layer = None  # To be defined in derived classes
-        self.batch_norm = nn.BatchNorm1d(hidden_size)
+        self.batch_norm = nn.BatchNorm1d(input_size)
         self.dropout = nn.Dropout(dropout_rate)
         self.activation_function = self.get_activation_function(activation_function)
     
@@ -34,8 +34,10 @@ class BaseModel(nn.Module):
             raise ValueError(f"Unsupported activation function: {name}")
     
     def forward(self, x):
-        x = self.activation_function(self.input_layer(x))
+        x = self.input_layer(self.batch_norm(x))
         for layer in self.hidden_layers:
-            x = self.activation_function(layer(self.batch_norm(x)))
-            x = self.dropout(x)
+            x = self.activation_function(x)
+            # x = self.batch_norm(x)
+            # x = self.dropout(x)
+            x = layer(x)
         return x

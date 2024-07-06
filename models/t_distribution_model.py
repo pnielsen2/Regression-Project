@@ -11,7 +11,9 @@ class TModel(BaseModel):
     def forward(self, x):
         x = super(TModel, self).forward(x)
         params = self.output_layer(x)
-        mu = params[:, 0]
-        sigma = F.softplus(params[:, 1])  # Ensure sigma is positive
+        theta_1, theta_2 =  params[:, 0], params[:, 1]
+        mu, sigma = -theta_1/(2*theta_2), torch.sqrt(torch.abs(-1/(2*theta_2)))
+        # mu = params[:, 0]
+        # sigma = F.softplus(params[:, 1])  # Ensure sigma is positive
         nu = F.softplus(params[:, 2]) + 2  # Ensure nu is positive and greater than 2
         return mu, sigma, nu

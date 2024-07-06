@@ -4,6 +4,11 @@ from models import TModel, NormalModel, NormalModelGlobalSigma, TDistributionLos
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from thop import profile
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to Agg
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
 
 def get_optimizer(optimizer_name, parameters, lr):
     if optimizer_name == 'adam':
@@ -179,6 +184,51 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
     except Exception as e:
         print(f"Training stopped due to an unexpected error: {str(e)}")
     finally:
+        # Create scatter plots
+        for name, model in models.items():
+            model.eval()
+            with torch.no_grad():
+                if name == 'TModel':
+                    mu, _, _ = model(X_test_tensor.to(device))
+                elif name == 'NormalModel':
+                    mu, _ = model(X_test_tensor.to(device))
+                else:  # NormalModelGlobalSigma
+                    mu, _ = model(X_test_tensor.to(device))
+                
+                mu = mu.cpu().numpy()
+                y_true = y_test_tensor.cpu().numpy()
+
+                fig, ax = plt.subplots(figsize=(10, 10))
+                ax.scatter(y_true, mu, alpha=0.5)
+                ax.set_xlabel('True Values')
+                ax.set_ylabel('Predicted Mu')
+                ax.set_title(f'{name} - Mu Predictions vs True Values')
+                
+                # Set y-axis limits to match the range of true y values
+                y_min, y_max = y_true.min(), y_true.max()
+                ax.set_ylim(y_min, y_max)
+                
+                # Plot the perfect prediction line
+                ax.plot([y_min, y_max], [y_min, y_max], 'r--', lw=2)
+                
+                # Add text showing the range of y values
+                ax.text(0.05, 0.95, f'Y range: {y_min:.2f} to {y_max:.2f}', 
+                        transform=ax.transAxes, verticalalignment='top')
+                
+                # Save the plot to a buffer
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png')
+                buf.seek(0)
+                
+                # Convert BytesIO to PIL Image
+                image = Image.open(buf)
+                
+                # Log the plot to wandb
+                wandb.log({f"{name}_mu_scatter": wandb.Image(image)})
+                
+                plt.close(fig)
+                buf.close()
+
         wandb.log({
             'best_model': best_model_name,
             'best_test_loss': best_test_loss,
