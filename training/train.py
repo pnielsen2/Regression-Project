@@ -19,10 +19,6 @@ def count_flops(model, input_size):
     input_tensor = torch.randn(1, input_size).to(next(model.parameters()).device)
     flops, _ = profile(model, inputs=(input_tensor,))
     return flops
-def count_flops(model, input_size):
-    input_tensor = torch.randn(1, input_size).to(next(model.parameters()).device)
-    flops, _ = profile(model, inputs=(input_tensor,))
-    return flops
 
 def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, device):
     input_size = X_train_tensor.shape[1]
@@ -95,6 +91,8 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                 model.eval()
 
             test_losses = {name: 0 for name in models}
+            output_params = {name: [] for name in models}
+            
             with torch.no_grad():
                 for X_batch, y_batch in test_loader:
                     X_batch, y_batch = X_batch.to(device), y_batch.to(device)
@@ -104,8 +102,10 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                         
                         if isinstance(output, tuple):
                             loss = criterions[name](*output, y_batch)
+                            output_params[name].append([o.cpu() for o in output])
                         else:
                             loss = criterions[name](output, y_batch)
+                            output_params[name].append(output.cpu())
 
                         if torch.isnan(loss):
                             raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN test loss, stopping training.')
@@ -121,10 +121,29 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                 avg_train_loss = train_losses[name] / len(train_loader)
                 avg_test_loss = test_losses[name] / len(test_loader)
                 
+                # Calculate mean and std of output parameters
+                if isinstance(output_params[name][0], list):  # For TModel
+                    output_stats = {
+                        f'{name}_mu_mean': torch.cat([batch[0] for batch in output_params[name]]).mean().item(),
+                        f'{name}_mu_std': torch.cat([batch[0] for batch in output_params[name]]).std().item(),
+                        f'{name}_sigma_mean': torch.cat([batch[1] for batch in output_params[name]]).mean().item(),
+                        f'{name}_sigma_std': torch.cat([batch[1] for batch in output_params[name]]).std().item(),
+                        f'{name}_nu_mean': torch.cat([batch[2] for batch in output_params[name]]).mean().item(),
+                        f'{name}_nu_std': torch.cat([batch[2] for batch in output_params[name]]).std().item()
+                    }
+                else:  # For NormalModel and NormalModelGlobalSigma
+                    output_stats = {
+                        f'{name}_mu_mean': torch.cat(output_params[name])[:, 0].mean().item(),
+                        f'{name}_mu_std': torch.cat(output_params[name])[:, 0].std().item(),
+                        f'{name}_sigma_mean': torch.cat(output_params[name])[:, 1].mean().item(),
+                        f'{name}_sigma_std': torch.cat(output_params[name])[:, 1].std().item()
+                    }
+
                 wandb.log({
                     'flops': total_flops[name],
                     f'{name}_train_loss': avg_train_loss,
                     f'{name}_test_loss': avg_test_loss,
+                    **output_stats
                 })
 
                 if avg_test_loss < best_test_loss:
