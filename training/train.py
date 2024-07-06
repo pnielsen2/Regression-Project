@@ -81,6 +81,10 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                         raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN loss, stopping training.')
 
                     loss.backward()
+                    for name, param in model.named_parameters():
+                        if param.requires_grad:
+                            wandb.log({f"{name}_grad_norm": param.grad.norm().item()})
+                            wandb.log({f"{name}_hist": wandb.Histogram(param.data.cpu())})
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizers[name].step()
 

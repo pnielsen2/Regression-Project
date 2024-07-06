@@ -6,6 +6,7 @@ class TDistributionLoss(nn.Module):
         super(TDistributionLoss, self).__init__()
 
     def forward(self, x, mu, sigma, nu):
+        sigma = sigma + 1e-6
         term1 = torch.lgamma((nu + 1) / 2) - torch.lgamma(nu / 2)
         term2 = -0.5 * torch.log(nu * torch.pi * sigma ** 2)
         term3 = -(nu + 1) / 2 * torch.log(1 + (1 / nu) * ((x - mu) / sigma) ** 2)
@@ -17,6 +18,7 @@ class NormalDistributionLoss(nn.Module):
         super(NormalDistributionLoss, self).__init__()
 
     def forward(self, x, mu, sigma):
+        sigma = sigma + 1e-6
         term1 = torch.log(sigma * torch.sqrt(torch.tensor(2 * torch.pi)))  # Fix here
         term2 = 0.5 * ((x - mu) / sigma) ** 2
         nll = (term1 + term2).mean()
