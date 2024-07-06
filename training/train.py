@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import wandb
 from models import TModel, NormalModel, NormalModelGlobalSigma, TDistributionLoss, NormalDistributionLoss
 import torch.optim as optim
@@ -20,46 +19,10 @@ def count_flops(model, input_size):
     input_tensor = torch.randn(1, input_size).to(next(model.parameters()).device)
     flops, _ = profile(model, inputs=(input_tensor,))
     return flops
-
-def log_model_stats(model, name):
-    for param_name, param in model.named_parameters():
-        wandb.log({
-            f'{name}_{param_name}_mean': param.data.mean().item(),
-            f'{name}_{param_name}_std': param.data.std().item(),
-            f'{name}_{param_name}_max': param.data.max().item(),
-            f'{name}_{param_name}_min': param.data.min().item(),
-        })
-
-def log_prediction_stats(model, X_test_tensor, name):
-    model.eval()
-    with torch.no_grad():
-        predictions = model(X_test_tensor)
-        if isinstance(predictions, tuple):
-            predictions = predictions[0]  # Assume first element is the mean prediction
-        wandb.log({
-            f'{name}_pred_mean': predictions.mean().item(),
-            f'{name}_pred_std': predictions.std().item(),
-            f'{name}_pred_max': predictions.max().item(),
-            f'{name}_pred_min': predictions.min().item(),
-        })
-
-def log_loss_components(x, mu, sigma, nu=None):
-    if nu is not None:  # T-distribution
-        term1 = torch.lgamma((nu + 1) / 2) - torch.lgamma(nu / 2)
-        term2 = -0.5 * torch.log(nu * torch.pi * sigma ** 2)
-        term3 = -(nu + 1) / 2 * torch.log(1 + (1 / nu) * ((x - mu) / sigma) ** 2)
-        wandb.log({
-            'TModel_loss_term1': term1.mean().item(),
-            'TModel_loss_term2': term2.mean().item(),
-            'TModel_loss_term3': term3.mean().item(),
-        })
-    else:  # Normal distribution
-        term1 = torch.log(sigma) + 0.5 * torch.log(torch.tensor(2 * torch.pi))
-        term2 = 0.5 * ((x - mu) / sigma) ** 2
-        wandb.log({
-            'NormalModel_loss_term1': term1.mean().item(),
-            'NormalModel_loss_term2': term2.mean().item(),
-        })
+def count_flops(model, input_size):
+    input_tensor = torch.randn(1, input_size).to(next(model.parameters()).device)
+    flops, _ = profile(model, inputs=(input_tensor,))
+    return flops
 
 def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, device):
     input_size = X_train_tensor.shape[1]
@@ -92,50 +55,38 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
     flops_per_forward = {name: count_flops(model, input_size) for name, model in models.items()}
     total_flops = {name: 0 for name in models}
 
-    # Log data statistics
-    wandb.log({
-        'X_train_mean': X_train_tensor.mean().item(),
-        'X_train_std': X_train_tensor.std().item(),
-        'y_train_mean': y_train_tensor.mean().item(),
-        'y_train_std': y_train_tensor.std().item(),
-    })
-
-    # Log model complexity
-    for name, model in models.items():
-        total_params = sum(p.numel() for p in model.parameters())
-        wandb.log({f'{name}_total_params': total_params})
-
     best_test_loss = float('inf')
     best_model_name = None
 
     try:
         for epoch in range(config.num_epochs):
+            # Training
             for name, model in models.items():
                 model.train()
 
             train_losses = {name: 0 for name in models}
-            for batch_idx, (X_batch, y_batch) in enumerate(train_loader):
+            for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 
                 for name, model in models.items():
                     optimizers[name].zero_grad()
                     output = model(X_batch)
                     
-                    if isinstance(model, TModel):
-                        mu, sigma, nu = output
-                        loss = criterions[name](y_batch, mu, sigma, nu)
-                        if epoch == 0 and batch_idx < 5:
-                            log_loss_components(y_batch, mu, sigma, nu)
+                    if isinstance(output, tuple):
+                        loss = criterions[name](*output, y_batch)
                     else:
-                        mu, sigma = output
-                        loss = criterions[name](y_batch, mu, sigma)
-                        if epoch == 0 and batch_idx < 5:
-                            log_loss_components(y_batch, mu, sigma)
+                        loss = criterions[name](output, y_batch)
 
                     if torch.isnan(loss):
                         raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN loss, stopping training.')
 
                     loss.backward()
+                    for name, model in models.items():
+                        wandb.log({f'{name}_lr': optimizers[name].param_groups[0]['lr']})
+                        for param_name, param in model.named_parameters():
+                            if param.grad is not None:
+                                wandb.log({f'{name}_{param_name}_grad_norm': param.grad.norm().item()})
+
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizers[name].step()
 
@@ -144,24 +95,6 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
 
                     if total_flops[name] > max_flops:
                         raise StopIteration(f'{name}: Reached max FLOPs ({max_flops}), stopping training.')
-
-                    # Log learning rate and gradients
-                    wandb.log({
-                        f'{name}_lr': optimizers[name].param_groups[0]['lr'],
-                        f'{name}_loss': loss.item(),
-                        f'{name}_flops': total_flops[name]
-                    })
-                    for param_name, param in model.named_parameters():
-                        if param.grad is not None:
-                            wandb.log({f'{name}_{param_name}_grad_norm': param.grad.norm().item()})
-
-                    # Log early iteration details
-                    if epoch == 0 and batch_idx < 5:
-                        wandb.log({
-                            f'{name}_batch_{batch_idx}_input': wandb.Histogram(X_batch.cpu().numpy()),
-                            f'{name}_batch_{batch_idx}_target': wandb.Histogram(y_batch.cpu().numpy()),
-                            f'{name}_batch_{batch_idx}_output': wandb.Histogram(mu.detach().cpu().numpy()),
-                        })
 
             # Evaluation
             for name, model in models.items():
@@ -175,12 +108,10 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                     for name, model in models.items():
                         output = model(X_batch)
                         
-                        if isinstance(model, TModel):
-                            mu, sigma, nu = output
-                            loss = criterions[name](y_batch, mu, sigma, nu)
+                        if isinstance(output, tuple):
+                            loss = criterions[name](*output, y_batch)
                         else:
-                            mu, sigma = output
-                            loss = criterions[name](y_batch, mu, sigma)
+                            loss = criterions[name](output, y_batch)
 
                         if torch.isnan(loss):
                             raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN test loss, stopping training.')
@@ -197,6 +128,7 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                 avg_test_loss = test_losses[name] / len(test_loader)
                 
                 wandb.log({
+                    'flops': total_flops[name],
                     f'{name}_train_loss': avg_train_loss,
                     f'{name}_test_loss': avg_test_loss,
                 })
@@ -205,13 +137,10 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                     best_test_loss = avg_test_loss
                     best_model_name = name
 
-                print(f'{name} - Epoch {epoch+1}/{config.num_epochs}, '
-                      f'Train Loss: {avg_train_loss:.4f}, Test Loss: {avg_test_loss:.4f}, '
-                      f'Total FLOPs: {total_flops[name]}')
-
-                # Log model and prediction stats
-                log_model_stats(models[name], name)
-                log_prediction_stats(models[name], X_test_tensor, name)
+                if (epoch + 1) % 10 == 0 or epoch == config.num_epochs - 1:
+                    print(f'{name} - Epoch {epoch+1}/{config.num_epochs}, '
+                          f'Train Loss: {avg_train_loss:.4f}, Test Loss: {avg_test_loss:.4f}, '
+                          f'Total FLOPs: {total_flops[name]}')
 
     except StopIteration as e:
         print(str(e))
