@@ -21,7 +21,7 @@ def count_flops(model, input_size):
     flops, _ = profile(model, inputs=(input_tensor,))
     return flops
 
-def train_model(model, criterion, optimizer, train_loader, test_loader, num_epochs, max_flops):
+def train_model(model, criterion, optimizer, train_loader, test_loader, num_epochs, max_flops, model_name):
     train_losses = []
     test_losses = []
     total_flops = 0
@@ -37,7 +37,7 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, num_epoc
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 optimizer.zero_grad()
                 
-                if isinstance(model, nn.Module):  # Generic handling for any PyTorch model
+                if isinstance(model, nn.Module):
                     output = model(X_batch)
                     if isinstance(output, tuple):
                         loss = criterion(*output, y_batch)
@@ -90,10 +90,10 @@ def train_model(model, criterion, optimizer, train_loader, test_loader, num_epoc
             test_losses.append(avg_test_loss)
             
             wandb.log({
-                'epoch': epoch,
-                'train_loss': avg_train_loss,
-                'test_loss': avg_test_loss,
-                'total_flops': total_flops
+                f'{model_name}_epoch': epoch,
+                f'{model_name}_train_loss': avg_train_loss,
+                f'{model_name}_test_loss': avg_test_loss,
+                f'{model_name}_flops': total_flops
             })
             
             if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
@@ -146,38 +146,14 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
         print(f'Training {name}...')
         train_losses, test_losses, total_flops = train_model(
             models[name], criterions[name], optimizers[name],
-            train_loader, test_loader, config.num_epochs, max_flops
+            train_loader, test_loader, config.num_epochs, max_flops, name
         )
         
-        # Log the results, handling the case where no full epoch was completed
-        if len(train_losses) > 0:
-            for epoch in range(len(train_losses)):
-                wandb.log({
-                    f'{name}_train_loss': train_losses[epoch],
-                    f'{name}_test_loss': test_losses[epoch] if epoch < len(test_losses) else None,
-                    f'{name}_total_flops': total_flops,
-                    f'{name}_flops_per_epoch': total_flops / (epoch + 1)
-                })
-            
-            if test_losses and test_losses[-1] < best_test_loss:
-                best_test_loss = test_losses[-1]
-                best_model_name = name
-        else:
-            # Log that training failed to complete even one epoch
-            wandb.log({
-                f'{name}_training_failed': True,
-                f'{name}_total_flops': total_flops
-            })
+        if test_losses and test_losses[-1] < best_test_loss:
+            best_test_loss = test_losses[-1]
+            best_model_name = name
 
-    # Log the best model, handling the case where no model completed training
-    if best_model_name:
-        wandb.log({
-            'best_model': best_model_name,
-            'best_test_loss': best_test_loss,
-            'total_flops': sum(wandb.run.summary.get(f'{name}_total_flops', 0) for name in models.keys())
-        })
-    else:
-        wandb.log({
-            'all_models_failed': True,
-            'total_flops': sum(wandb.run.summary.get(f'{name}_total_flops', 0) for name in models.keys())
-        })
+    wandb.log({
+        'best_model': best_model_name,
+        'best_test_loss': best_test_loss
+    })
