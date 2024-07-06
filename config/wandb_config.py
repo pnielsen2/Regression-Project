@@ -6,7 +6,7 @@ sweep_config = {
     },
     'parameters': {
         'max_flops': {
-            'values': [1e10, 1e11, 1e12]
+            'value': 1e10
         },
         'learning_rate': {
             'values': [0.0001, 0.001, 0.01]
