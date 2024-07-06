@@ -98,20 +98,18 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                     X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                     
                     for name, model in models.items():
-                        output = model(X_batch)
-                        
                         if name == 'TModel':
-                            mu, sigma, nu = output
+                            mu, sigma, nu = model(X_batch)
                             loss = criterions[name](y_batch, mu, sigma, nu)
                             output_params[name].append((mu.cpu(), sigma.cpu(), nu.cpu()))
                         elif name == 'NormalModel':
-                            mu, sigma = output
+                            mu, sigma = model(X_batch)
                             loss = criterions[name](y_batch, mu, sigma)
                             output_params[name].append((mu.cpu(), sigma.cpu()))
                         else:  # NormalModelGlobalSigma
-                            mu = output
-                            loss = criterions[name](y_batch, mu, model.sigma)
-                            output_params[name].append(mu.cpu())
+                            mu, sigma = model(X_batch)
+                            loss = criterions[name](y_batch, mu, sigma)
+                            output_params[name].append((mu.cpu(), sigma.cpu()))
 
                         if torch.isnan(loss):
                             raise ValueError(f'{name}: Epoch {epoch+1}: Detected NaN test loss, stopping training.')
@@ -150,11 +148,11 @@ def train(config, X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, 
                         f'{name}_sigma_std': sigma_cat.std().item()
                     }
                 else:  # NormalModelGlobalSigma
-                    mu_cat = torch.cat(output_params[name])
+                    mu_cat = torch.cat([batch[0] for batch in output_params[name]])
                     output_stats = {
                         f'{name}_mu_mean': mu_cat.mean().item(),
                         f'{name}_mu_std': mu_cat.std().item(),
-                        f'{name}_sigma': models[name].sigma.item()  # Log the global sigma
+                        f'{name}_global_sigma': models[name].sigma.item()
                     }
 
                 wandb.log({
